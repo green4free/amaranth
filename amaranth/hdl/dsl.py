@@ -3,6 +3,7 @@ from contextlib import contextmanager, _GeneratorContextManager
 from functools import wraps
 from enum import Enum
 import warnings
+from typing import Hashable
 
 from .._utils import flatten, bits_for
 from .. import tracer
@@ -528,6 +529,13 @@ class Module(_ModuleBuilderRoot, Elaboratable):
     def _flush(self):
         while self._ctrl_stack:
             self._pop_ctrl()
+    
+    def setPureIdentifier(self, *id):
+        assert isinstance(id, Hashable), "New pureIdentifier is not hashable"
+        self._generated["p_signature"] = id
+
+    def unsetPureIdentifier(self):
+        self._generated.pop("p_signature", None)
 
     def elaborate(self, platform):
         self._flush()
