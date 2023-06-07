@@ -76,15 +76,17 @@ class _Namer:
 
 
 class _BufferedBuilder:
-    def __init__(self):
+    def __init__(self, fake = False):
         super().__init__()
+        self.fake = fake
         self._buffer = io.StringIO()
 
     def __str__(self):
         return self._buffer.getvalue()
 
     def _append(self, fmt, *args, **kwargs):
-        self._buffer.write(fmt.format(*args, **kwargs))
+        if not self.fake:
+            self._buffer.write(fmt.format(*args, **kwargs))
 
 
 class _ProxiedBuilder:
@@ -113,14 +115,15 @@ class _Builder(_BufferedBuilder, _Namer):
         super().__init__()
         self.emit_src = emit_src
 
-    def module(self, name=None, attrs={}):
+    def module(self, name=None, attrs={}, fake=False):
         name = self._make_name(name, local=False)
-        return _ModuleBuilder(self, name, attrs)
+        return _ModuleBuilder(self, name, attrs, fake=fake)
 
 
 class _ModuleBuilder(_AttrBuilder, _BufferedBuilder, _Namer):
-    def __init__(self, rtlil, name, attrs):
+    def __init__(self, rtlil, name, attrs, fake=False):
         super().__init__(emit_src=rtlil.emit_src)
+        self.fake = fake
         self.rtlil = rtlil
         self.name  = name
         self.attrs = {"generator": "Amaranth"}
@@ -197,6 +200,7 @@ class _ProcessBuilder(_AttrBuilder, _BufferedBuilder):
     def __init__(self, rtlil, name, attrs, src):
         super().__init__(emit_src=rtlil.emit_src)
         self.rtlil = rtlil
+        self.fake = rtlil.fake
         self.name  = name
         self.attrs = {}
         self.src   = src
@@ -814,6 +818,8 @@ class _StatementCompiler(xfrm.StatementVisitor):
             self.on_statement(stmt)
 
 
+pureFragmentCache = {}
+
 def _convert_fragment(builder, fragment, name_map, hierarchy):
     if isinstance(fragment, ir.Instance):
         port_map = OrderedDict()
@@ -825,13 +831,22 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
         else:
             return "\\{}".format(fragment.type), port_map
 
+    pure = False
+    novel = True
+    s = None
+    if "p_signature" in fragment.generated:
+        pure = True
+        s = fragment.generated["p_signature"]
+        if s in pureFragmentCache:
+            novel = False
+
     module_name  = hierarchy[-1] or "anonymous"
     module_attrs = OrderedDict()
     if len(hierarchy) == 1:
         module_attrs["top"] = 1
     module_attrs["amaranth.hierarchy"] = ".".join(name or "anonymous" for name in hierarchy)
 
-    with builder.module(module_name, attrs=module_attrs) as module:
+    with builder.module(module_name, attrs=module_attrs, fake=not novel) as module:
         compiler_state = _ValueCompilerState(module)
         rhs_compiler   = _RHSValueCompiler(compiler_state)
         lhs_compiler   = _LHSValueCompiler(compiler_state)
@@ -864,97 +879,88 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
         # Transform all subfragments to their respective cells. Transforming signals connected
         # to their ports into wires eagerly makes sure they get sensible (prefixed with submodule
         # name) names.
-        memories = OrderedDict()
-        for subfragment, sub_name in fragment.subfragments:
-            if sub_name is None:
-                sub_name = module.anonymous()
 
-            sub_params = OrderedDict()
-            if hasattr(subfragment, "parameters"):
-                for param_name, param_value in subfragment.parameters.items():
-                    if isinstance(param_value, mem.Memory):
-                        memory = param_value
-                        if memory not in memories:
-                            memories[memory] = module.memory(width=memory.width, size=memory.depth,
-                                                             name=memory.name, attrs=memory.attrs)
-                            addr_bits = bits_for(memory.depth)
-                            data_parts = []
-                            data_mask = (1 << memory.width) - 1
-                            for addr in range(memory.depth):
-                                if addr < len(memory.init):
-                                    data = memory.init[addr] & data_mask
-                                else:
-                                    data = 0
-                                data_parts.append("{:0{}b}".format(data, memory.width))
-                            module.cell("$meminit", ports={
-                                "\\ADDR": rhs_compiler(ast.Const(0, addr_bits)),
-                                "\\DATA": "{}'".format(memory.width * memory.depth) +
-                                          "".join(reversed(data_parts)),
-                            }, params={
-                                "MEMID": memories[memory],
-                                "ABITS": addr_bits,
-                                "WIDTH": memory.width,
-                                "WORDS": memory.depth,
-                                "PRIORITY": 0,
-                            })
-
-                        param_value = memories[memory]
-
-                    sub_params[param_name] = param_value
-
-            sub_type, sub_port_map = \
-                _convert_fragment(builder, subfragment, name_map,
-                                  hierarchy=hierarchy + (sub_name,))
-
-            sub_ports = OrderedDict()
-            for port, value in sub_port_map.items():
-                if not isinstance(subfragment, ir.Instance):
-                    for signal in value._rhs_signals():
-                        compiler_state.resolve_curr(signal, prefix=sub_name)
-                if len(value) > 0:
-                    sub_ports[port] = rhs_compiler(value)
-
-            module.cell(sub_type, name=sub_name, ports=sub_ports, params=sub_params,
-                        attrs=subfragment.attrs)
-
-        # If we emit all of our combinatorial logic into a single RTLIL process, Verilog
-        # simulators will break horribly, because Yosys write_verilog transforms RTLIL processes
-        # into always @* blocks with blocking assignment, and that does not create delta cycles.
-        #
-        # Therefore, we translate the fragment as many times as there are independent groups
-        # of signals (a group is a transitive closure of signals that appear together on LHS),
-        # splitting them into many RTLIL (and thus Verilog) processes.
-        lhs_grouper = xfrm.LHSGroupAnalyzer()
-        lhs_grouper.on_statements(fragment.statements)
-
-        for group, group_signals in lhs_grouper.groups().items():
-            lhs_group_filter = xfrm.LHSGroupFilter(group_signals)
-            group_stmts = lhs_group_filter(fragment.statements)
-
-            with module.process(name="$group_{}".format(group)) as process:
-                with process.case() as case:
-                    # For every signal in comb domain, assign \sig$next to the reset value.
-                    # For every signal in sync domains, assign \sig$next to the current
-                    # value (\sig).
-                    for domain, signal in fragment.iter_drivers():
-                        if signal not in group_signals:
-                            continue
-                        if domain is None:
-                            prev_value = ast.Const(signal.reset, signal.width)
-                        else:
-                            prev_value = signal
-                        case.assign(lhs_compiler(signal), rhs_compiler(prev_value))
-
-                    # Convert statements into decision trees.
-                    stmt_compiler._case = case
-                    stmt_compiler._has_rhs = False
-                    stmt_compiler._wrap_assign = False
-                    stmt_compiler(group_stmts)
-        
-        # For every driven signal in the sync domain, create a flop of appropriate type. Which type
-        # is appropriate depends on the domain: for domains with sync reset, it is a $dff, for
-        # domains with async reset it is an $adff. The latter is directly provided with the reset
-        # value as a parameter to the cell, which is directly assigned during reset.
+        if novel:
+            memories = OrderedDict()
+            for subfragment, sub_name in fragment.subfragments:
+                if sub_name is None:
+                    sub_name = module.anonymous()
+                sub_params = OrderedDict()
+                if hasattr(subfragment, "parameters"):
+                    for param_name, param_value in subfragment.parameters.items():
+                        if isinstance(param_value, mem.Memory):
+                            memory = param_value
+                            if memory not in memories:
+                                memories[memory] = module.memory(width=memory.width, size=memory.depth,
+                                                                 name=memory.name, attrs=memory.attrs)
+                                addr_bits = bits_for(memory.depth)
+                                data_parts = []
+                                data_mask = (1 << memory.width) - 1
+                                for addr in range(memory.depth):
+                                    if addr < len(memory.init):
+                                        data = memory.init[addr] & data_mask
+                                    else:
+                                        data = 0
+                                    data_parts.append("{:0{}b}".format(data, memory.width))
+                                module.cell("$meminit", ports={
+                                    "\\ADDR": rhs_compiler(ast.Const(0, addr_bits)),
+                                    "\\DATA": "{}'".format(memory.width * memory.depth) +
+                                              "".join(reversed(data_parts)),
+                                }, params={
+                                    "MEMID": memories[memory],
+                                    "ABITS": addr_bits,
+                                    "WIDTH": memory.width,
+                                    "WORDS": memory.depth,
+                                    "PRIORITY": 0,
+                                })
+                            param_value = memories[memory]
+                        sub_params[param_name] = param_value
+                sub_type, sub_port_map = \
+                    _convert_fragment(builder, subfragment, name_map,
+                                      hierarchy=hierarchy + (sub_name,))
+                sub_ports = OrderedDict()
+                for port, value in sub_port_map.items():
+                    if not isinstance(subfragment, ir.Instance):
+                        for signal in value._rhs_signals():
+                            compiler_state.resolve_curr(signal, prefix=sub_name)
+                    if len(value) > 0:
+                        sub_ports[port] = rhs_compiler(value)
+                module.cell(sub_type, name=sub_name, ports=sub_ports, params=sub_params,
+                            attrs=subfragment.attrs)
+            # If we emit all of our combinatorial logic into a single RTLIL process, Verilog
+            # simulators will break horribly, because Yosys write_verilog transforms RTLIL processes
+            # into always @* blocks with blocking assignment, and that does not create delta cycles.
+            #
+            # Therefore, we translate the fragment as many times as there are independent groups
+            # of signals (a group is a transitive closure of signals that appear together on LHS),
+            # splitting them into many RTLIL (and thus Verilog) processes.
+            lhs_grouper = xfrm.LHSGroupAnalyzer()
+            lhs_grouper.on_statements(fragment.statements)
+            for group, group_signals in lhs_grouper.groups().items():
+                lhs_group_filter = xfrm.LHSGroupFilter(group_signals)
+                group_stmts = lhs_group_filter(fragment.statements)
+                with module.process(name="$group_{}".format(group)) as process:
+                    with process.case() as case:
+                        # For every signal in comb domain, assign \sig$next to the reset value.
+                        # For every signal in sync domains, assign \sig$next to the current
+                        # value (\sig).
+                        for domain, signal in fragment.iter_drivers():
+                            if signal not in group_signals:
+                                continue
+                            if domain is None:
+                                prev_value = ast.Const(signal.reset, signal.width)
+                            else:
+                                prev_value = signal
+                            case.assign(lhs_compiler(signal), rhs_compiler(prev_value))
+                        # Convert statements into decision trees.
+                        stmt_compiler._case = case
+                        stmt_compiler._has_rhs = False
+                        stmt_compiler._wrap_assign = False
+                        stmt_compiler(group_stmts)
+            # For every driven signal in the sync domain, create a flop of appropriate type. Which type
+            # is appropriate depends on the domain: for domains with sync reset, it is a $dff, for
+            # domains with async reset it is an $adff. The latter is directly provided with the reset
+            # value as a parameter to the cell, which is directly assigned during reset.
         for domain, signal in fragment.iter_sync():
             cd = fragment.domains[domain]
 
@@ -1026,6 +1032,11 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
             wire_name = wire_name[1:]
         name_map[signal] = hierarchy + (wire_name,)
 
+    if pure:
+        if novel:
+            pureFragmentCache[s] = module.name
+        else:
+            return pureFragmentCache[s], port_map
     return module.name, port_map
 
 
