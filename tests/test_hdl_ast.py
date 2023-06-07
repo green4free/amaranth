@@ -2,6 +2,7 @@ import warnings
 from enum import Enum
 
 from amaranth.hdl.ast import *
+from amaranth.lib.enum import Enum as AmaranthEnum
 
 from .utils import *
 from amaranth._utils import _ignore_deprecated
@@ -116,6 +117,9 @@ class ShapeTestCase(FHDLTestCase):
         s7 = Shape.cast(range(-1, -1))
         self.assertEqual(s7.width, 0)
         self.assertEqual(s7.signed, True)
+        s8 = Shape.cast(range(0, 10, 3))
+        self.assertEqual(s8.width, 4)
+        self.assertEqual(s8.signed, False)
 
     def test_cast_enum(self):
         s1 = Shape.cast(UnsignedEnum)
@@ -143,6 +147,12 @@ class MockShapeCastable(ShapeCastable):
 
     def as_shape(self):
         return self.dest
+
+    def __call__(self, value):
+        return value
+
+    def const(self, init):
+        return Const(init, self.dest)
 
 
 class ShapeCastableTestCase(FHDLTestCase):
@@ -314,6 +324,10 @@ class ValueTestCase(FHDLTestCase):
                         "(cat (slice (const 9'd256) 1:9) (slice (const 9'd256) 0:1))")
         self.assertRepr(Const(256).rotate_left(-7),
                         "(cat (slice (const 9'd256) 7:9) (slice (const 9'd256) 0:7))")
+        self.assertRepr(Const(0, 0).rotate_left(3),
+                        "(cat (slice (const 0'd0) 0:0) (slice (const 0'd0) 0:0))")
+        self.assertRepr(Const(0, 0).rotate_left(-3),
+                        "(cat (slice (const 0'd0) 0:0) (slice (const 0'd0) 0:0))")
 
     def test_rotate_left_wrong(self):
         with self.assertRaisesRegex(TypeError,
@@ -329,6 +343,10 @@ class ValueTestCase(FHDLTestCase):
                         "(cat (slice (const 9'd256) 8:9) (slice (const 9'd256) 0:8))")
         self.assertRepr(Const(256).rotate_right(-7),
                         "(cat (slice (const 9'd256) 2:9) (slice (const 9'd256) 0:2))")
+        self.assertRepr(Const(0, 0).rotate_right(3),
+                        "(cat (slice (const 0'd0) 0:0) (slice (const 0'd0) 0:0))")
+        self.assertRepr(Const(0, 0).rotate_right(-3),
+                        "(cat (slice (const 0'd0) 0:0) (slice (const 0'd0) 0:0))")
 
     def test_rotate_right_wrong(self):
         with self.assertRaisesRegex(TypeError,
@@ -362,6 +380,8 @@ class ConstTestCase(FHDLTestCase):
 
     def test_normalization(self):
         self.assertEqual(Const(0b10110, signed(5)).value, -10)
+        self.assertEqual(Const(0b10000, signed(4)).value, 0)
+        self.assertEqual(Const(-16, 4).value, 0)
 
     def test_value(self):
         self.assertEqual(Const(10).value, 10)
@@ -423,7 +443,7 @@ class OperatorTestCase(FHDLTestCase):
     def test_sub(self):
         v1 = Const(0, unsigned(4)) - Const(0, unsigned(6))
         self.assertEqual(repr(v1), "(- (const 4'd0) (const 6'd0))")
-        self.assertEqual(v1.shape(), unsigned(7))
+        self.assertEqual(v1.shape(), signed(7))
         v2 = Const(0, signed(4)) - Const(0, signed(6))
         self.assertEqual(v2.shape(), signed(7))
         v3 = Const(0, signed(4)) - Const(0, unsigned(4))
@@ -431,7 +451,9 @@ class OperatorTestCase(FHDLTestCase):
         v4 = Const(0, unsigned(4)) - Const(0, signed(4))
         self.assertEqual(v4.shape(), signed(6))
         v5 = 10 - Const(0, 4)
-        self.assertEqual(v5.shape(), unsigned(5))
+        self.assertEqual(v5.shape(), signed(5))
+        v6 = 1 - Const(2)
+        self.assertEqual(v6.shape(), signed(3))
 
     def test_mul(self):
         v1 = Const(0, unsigned(4)) * Const(0, unsigned(6))
@@ -694,6 +716,9 @@ class SliceTestCase(FHDLTestCase):
         with self.assertRaisesRegex(IndexError,
                 r"^Slice start 4 must be less than slice stop 2$"):
             Slice(c, 4, 2)
+        with self.assertRaisesRegex(IndexError,
+                r"^Cannot start slice -9 bits into 8-bit value$"):
+            Slice(c, -9, -5)
 
     def test_repr(self):
         s1 = Const(10)[2]
@@ -994,6 +1019,32 @@ class SignalTestCase(FHDLTestCase):
                 r"^Reset value must be a constant-castable expression, "
                 r"not <StringEnum\.FOO: 'a'>$"):
             Signal(1, reset=StringEnum.FOO)
+
+    def test_reset_shape_castable_const(self):
+        class CastableFromHex(ShapeCastable):
+            def as_shape(self):
+                return unsigned(8)
+
+            def __call__(self, value):
+                return value
+
+            def const(self, init):
+                return int(init, 16)
+
+        s1 = Signal(CastableFromHex(), reset="aa")
+        self.assertEqual(s1.reset, 0xaa)
+
+        with self.assertRaisesRegex(ValueError,
+                r"^Constant returned by <.+?CastableFromHex.+?>\.const\(\) must have the shape "
+                r"that it casts to, unsigned\(8\), and not unsigned\(1\)$"):
+            Signal(CastableFromHex(), reset="01")
+
+    def test_reset_shape_castable_enum_wrong(self):
+        class EnumA(AmaranthEnum):
+            X = 1
+        with self.assertRaisesRegex(TypeError,
+                r"^Reset value must be a constant initializer of <enum 'EnumA'>$"):
+            Signal(EnumA) # implied reset=0
 
     def test_reset_signed_mismatch(self):
         with self.assertWarnsRegex(SyntaxWarning,

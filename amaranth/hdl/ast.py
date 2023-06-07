@@ -1,4 +1,5 @@
 from abc import ABCMeta, abstractmethod
+import inspect
 import warnings
 import functools
 from collections import OrderedDict
@@ -45,6 +46,12 @@ class ShapeCastable:
         if not hasattr(cls, "as_shape"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
                             f"the `as_shape` method")
+        if not (hasattr(cls, "__call__") and inspect.isfunction(cls.__call__)):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
+                            f"the `__call__` method")
+        if not hasattr(cls, "const"):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ShapeCastable` must override "
+                            f"the `const` method")
 
 
 class Shape:
@@ -110,9 +117,9 @@ class Shape:
             elif isinstance(obj, range):
                 if len(obj) == 0:
                     return Shape(0, obj.start < 0)
-                signed = obj.start < 0 or (obj.stop - obj.step) < 0
-                width  = max(bits_for(obj.start, signed),
-                             bits_for(obj.stop - obj.step, signed))
+                signed = obj[0] < 0 or obj[-1] < 0
+                width  = max(bits_for(obj[0], signed),
+                             bits_for(obj[-1], signed))
                 return Shape(width, signed)
             elif isinstance(obj, type) and issubclass(obj, Enum):
                 # For compatibility with third party enumerations, handle them as if they were
@@ -509,7 +516,8 @@ class Value(metaclass=ABCMeta):
         """
         if not isinstance(amount, int):
             raise TypeError("Rotate amount must be an integer, not {!r}".format(amount))
-        amount %= len(self)
+        if len(self) != 0:
+            amount %= len(self)
         return Cat(self[-amount:], self[:-amount]) # meow :3
 
     def rotate_right(self, amount):
@@ -527,7 +535,8 @@ class Value(metaclass=ABCMeta):
         """
         if not isinstance(amount, int):
             raise TypeError("Rotate amount must be an integer, not {!r}".format(amount))
-        amount %= len(self)
+        if len(self) != 0:
+            amount %= len(self)
         return Cat(self[amount:], self[:amount])
 
     def eq(self, value):
@@ -640,7 +649,7 @@ class Const(Value):
             shape = Shape.cast(shape, src_loc_at=1 + src_loc_at)
         self.width  = shape.width
         self.signed = shape.signed
-        if self.signed and self.value >> (self.width - 1):
+        if self.signed and self.value >> (self.width - 1) & 1:
             self.value |= -(1 << self.width)
         else:
             self.value &= (1 << self.width) - 1
@@ -721,9 +730,12 @@ class Operator(Value):
                 return Shape(a_shape.width, True)
         elif len(op_shapes) == 2:
             a_shape, b_shape = op_shapes
-            if self.operator in ("+", "-"):
+            if self.operator == "+":
                 o_shape = _bitwise_binary_shape(*op_shapes)
                 return Shape(o_shape.width + 1, o_shape.signed)
+            if self.operator == "-":
+                o_shape = _bitwise_binary_shape(*op_shapes)
+                return Shape(o_shape.width + 1, True)
             if self.operator == "*":
                 return Shape(a_shape.width + b_shape.width, a_shape.signed or b_shape.signed)
             if self.operator == "//":
@@ -787,11 +799,11 @@ class Slice(Value):
             raise TypeError("Slice stop must be an integer, not {!r}".format(stop))
 
         n = len(value)
-        if start not in range(-(n+1), n+1):
+        if start not in range(-n, n+1):
             raise IndexError("Cannot start slice {} bits into {}-bit value".format(start, n))
         if start < 0:
             start += n
-        if stop not in range(-(n+1), n+1):
+        if stop not in range(-n, n+1):
             raise IndexError("Cannot stop slice {} bits into {}-bit value".format(stop, n))
         if stop < 0:
             stop += n
@@ -946,8 +958,16 @@ class Repl(Value):
         return "(repl {!r} {})".format(self.value, self.count)
 
 
+class _SignalMeta(ABCMeta):
+    def __call__(cls, shape=None, src_loc_at=0, **kwargs):
+        signal = super().__call__(shape, **kwargs, src_loc_at=src_loc_at + 1)
+        if isinstance(shape, ShapeCastable):
+            return shape(signal)
+        return signal
+
+
 # @final
-class Signal(Value, DUID):
+class Signal(Value, DUID, metaclass=_SignalMeta):
     """A varying integer value.
 
     Parameters
@@ -988,7 +1008,7 @@ class Signal(Value, DUID):
     decoder : function
     """
 
-    def __init__(self, shape=None, *, name=None, reset=0, reset_less=False,
+    def __init__(self, shape=None, *, name=None, reset=None, reset_less=False,
                  attrs=None, decoder=None, src_loc_at=0):
         super().__init__(src_loc_at=src_loc_at)
 
@@ -1005,12 +1025,24 @@ class Signal(Value, DUID):
         self.signed = shape.signed
 
         orig_reset = reset
-        try:
-            reset = Const.cast(reset)
-        except TypeError:
-            raise TypeError("Reset value must be a constant-castable expression, not {!r}"
-                            .format(orig_reset))
-        if orig_reset not in (0, -1): # Avoid false positives for all-zeroes and all-ones
+        if isinstance(orig_shape, ShapeCastable):
+            try:
+                reset = Const.cast(orig_shape.const(reset))
+            except Exception:
+                raise TypeError("Reset value must be a constant initializer of {!r}"
+                                .format(orig_shape))
+            if reset.shape() != Shape.cast(orig_shape):
+                raise ValueError("Constant returned by {!r}.const() must have the shape that "
+                                 "it casts to, {!r}, and not {!r}"
+                                 .format(orig_shape, Shape.cast(orig_shape),
+                                         reset.shape()))
+        else:
+            try:
+                reset = Const.cast(reset or 0)
+            except TypeError:
+                raise TypeError("Reset value must be a constant-castable expression, not {!r}"
+                                .format(orig_reset))
+        if orig_reset not in (None, 0, -1): # Avoid false positives for all-zeroes and all-ones
             if reset.shape().signed and not self.signed:
                 warnings.warn(
                     message="Reset value {!r} is signed, but the signal shape is {!r}"
