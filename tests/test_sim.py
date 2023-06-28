@@ -1,4 +1,5 @@
 import os
+import warnings
 from contextlib import contextmanager
 
 from amaranth._utils import flatten
@@ -289,8 +290,8 @@ class SimulatorUnitTestCase(FHDLTestCase):
         stmt = lambda y, a: [rec.eq(a), y.eq(rec)]
         self.assertStatement(stmt, [C(0b101, 3)], C(0b101, 3))
 
-    def test_repl(self):
-        stmt = lambda y, a: y.eq(Repl(a, 3))
+    def test_replicate(self):
+        stmt = lambda y, a: y.eq(a.replicate(3))
         self.assertStatement(stmt, [C(0b10, 2)], C(0b101010, 6))
 
     def test_array(self):
@@ -872,16 +873,20 @@ class SimulatorIntegrationTestCase(FHDLTestCase):
                 with sim.write_vcd(f):
                     pass
 
+    def test_no_negated_boolean_warning(self):
+        m = Module()
+        a = Signal()
+        b = Signal()
+        m.d.comb += a.eq(~(b == b))
+        with warnings.catch_warnings(record=True) as warns:
+            Simulator(m).run()
+            self.assertEqual(warns, [])
+
 
 class SimulatorRegressionTestCase(FHDLTestCase):
     def test_bug_325(self):
         dut = Module()
         dut.d.comb += Signal().eq(Cat())
-        Simulator(dut).run()
-
-    def test_bug_325_bis(self):
-        dut = Module()
-        dut.d.comb += Signal().eq(Repl(Const(1), 0))
         Simulator(dut).run()
 
     def test_bug_473(self):
@@ -910,7 +915,7 @@ class SimulatorRegressionTestCase(FHDLTestCase):
         z = Signal(32)
         dut.d.comb += z.eq(a << b)
         with self.assertRaisesRegex(OverflowError,
-                r"^Value defined at .+?/test_sim\.py:\d+ is 4294967327 bits wide, "
+                r"^Value defined at .+?[\\/]test_sim\.py:\d+ is 4294967327 bits wide, "
                 r"which is unlikely to simulate in reasonable time$"):
             Simulator(dut)
 
@@ -922,3 +927,12 @@ class SimulatorRegressionTestCase(FHDLTestCase):
                 r"^Adding a clock process that drives a clock domain object named 'sync', "
                 r"which is distinct from an identically named domain in the simulated design$"):
             sim.add_clock(1e-6, domain=ClockDomain("sync"))
+
+    def test_bug_826(self):
+        sim = Simulator(Module())
+        def process():
+            self.assertEqual((yield C(0b0000, 4) | ~C(1, 1)), 0b0000)
+            self.assertEqual((yield C(0b1111, 4) & ~C(1, 1)), 0b0000)
+            self.assertEqual((yield C(0b1111, 4) ^ ~C(1, 1)), 0b1111)
+        sim.add_process(process)
+        sim.run()

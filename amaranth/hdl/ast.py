@@ -263,7 +263,7 @@ class Value(metaclass=ABCMeta):
 
     def __abs__(self):
         if self.shape().signed:
-            return Mux(self >= 0, self, -self)
+            return Mux(self >= 0, self, -self)[:len(self)]
         else:
             return self
 
@@ -277,12 +277,12 @@ class Value(metaclass=ABCMeta):
                 raise IndexError(f"Index {key} is out of bounds for a {n}-bit value")
             if key < 0:
                 key += n
-            return Slice(self, key, key + 1)
+            return Slice(self, key, key + 1, src_loc_at=1)
         elif isinstance(key, slice):
             start, stop, step = key.indices(n)
             if step != 1:
                 return Cat(self[i] for i in range(start, stop, step))
-            return Slice(self, start, stop)
+            return Slice(self, start, stop, src_loc_at=1)
         else:
             raise TypeError("Cannot index value with {}".format(repr(key)))
 
@@ -538,6 +538,29 @@ class Value(metaclass=ABCMeta):
         if len(self) != 0:
             amount %= len(self)
         return Cat(self[amount:], self[:amount])
+
+    def replicate(self, count):
+        """Replication.
+
+        A ``Value`` is replicated (repeated) several times to be used
+        on the RHS of assignments::
+
+            len(v.replicate(n)) == len(v) * n
+
+        Parameters
+        ----------
+        count : int
+            Number of replications.
+
+        Returns
+        -------
+        Value, out
+            Replicated value.
+        """
+        if not isinstance(count, int) or count < 0:
+            raise TypeError("Replication count must be a non-negative integer, not {!r}"
+                            .format(count))
+        return Cat(self for _ in range(count))
 
     def eq(self, value):
         """Assignment.
@@ -798,6 +821,7 @@ class Slice(Value):
         if not isinstance(stop, int):
             raise TypeError("Slice stop must be an integer, not {!r}".format(stop))
 
+        value = Value.cast(value)
         n = len(value)
         if start not in range(-n, n+1):
             raise IndexError("Cannot start slice {} bits into {}-bit value".format(start, n))
@@ -811,7 +835,7 @@ class Slice(Value):
             raise IndexError("Slice start {} must be less than slice stop {}".format(start, stop))
 
         super().__init__(src_loc_at=src_loc_at)
-        self.value = Value.cast(value)
+        self.value = value
         self.start = int(start)
         self.stop  = int(stop)
 
@@ -837,7 +861,7 @@ class Part(Value):
             raise TypeError("Part stride must be a positive integer, not {!r}".format(stride))
 
         super().__init__(src_loc_at=src_loc_at)
-        self.value  = value
+        self.value  = Value.cast(value)
         self.offset = Value.cast(offset)
         self.width  = width
         self.stride = stride
@@ -913,8 +937,9 @@ class Cat(Value):
         return "(cat {})".format(" ".join(map(repr, self.parts)))
 
 
-@final
-class Repl(Value):
+# TODO(amaranth-0.5): remove
+@deprecated("instead of `Repl(value, count)`, use `value.replicate(count)`")
+def Repl(value, count):
     """Replicate a value
 
     An input value is replicated (repeated) several times
@@ -931,31 +956,16 @@ class Repl(Value):
 
     Returns
     -------
-    Repl, out
+    Value, out
         Replicated value.
     """
-    def __init__(self, value, count, *, src_loc_at=0):
-        if not isinstance(count, int) or count < 0:
-            raise TypeError("Replication count must be a non-negative integer, not {!r}"
-                            .format(count))
+    if isinstance(value, int) and value not in [0, 1]:
+        warnings.warn("Value argument of Repl() is a bare integer {} used in bit vector "
+                        "context; consider specifying explicit width using C({}, {}) instead"
+                        .format(value, value, bits_for(value)),
+                        SyntaxWarning, stacklevel=3)
 
-        super().__init__(src_loc_at=src_loc_at)
-        if isinstance(value, int) and value not in [0, 1]:
-            warnings.warn("Value argument of Repl() is a bare integer {} used in bit vector "
-                          "context; consider specifying explicit width using C({}, {}) instead"
-                          .format(value, value, bits_for(value)),
-                          SyntaxWarning, stacklevel=2 + src_loc_at)
-        self.value = Value.cast(value)
-        self.count = count
-
-    def shape(self):
-        return Shape(len(self.value) * self.count)
-
-    def _rhs_signals(self):
-        return self.value._rhs_signals()
-
-    def __repr__(self):
-        return "(repl {!r} {})".format(self.value, self.count)
+    return Value.cast(value).replicate(count)
 
 
 class _SignalMeta(ABCMeta):
@@ -1727,8 +1737,6 @@ class ValueKey:
                               tuple(ValueKey(e) for e in self.value._iter_as_values())))
         elif isinstance(self.value, Sample):
             self._hash = hash((ValueKey(self.value.value), self.value.clocks, self.value.domain))
-        elif isinstance(self.value, Repl):
-            self._hash = hash((ValueKey(self.value.value), self.value.count))
         elif isinstance(self.value, Initial):
             self._hash = 0
         else: # :nocov:
@@ -1745,7 +1753,7 @@ class ValueKey:
             return False
 
         if isinstance(self.value, Const):
-            return self.value.value == other.value.value
+            return self.value.value == other.value.value and self.value.width == other.value.width
         elif isinstance(self.value, (Signal, AnyValue)):
             return self.value is other.value
         elif isinstance(self.value, (ClockSignal, ResetSignal)):
@@ -1765,11 +1773,9 @@ class ValueKey:
                     self.value.width == other.value.width and
                     self.value.stride == other.value.stride)
         elif isinstance(self.value, Cat):
-            return all(ValueKey(a) == ValueKey(b)
-                        for a, b in zip(self.value.parts, other.value.parts))
-        elif isinstance(self.value, Repl):
-            return (ValueKey(self.value.value) == ValueKey(other.value.value) and
-                    self.value.count == other.value.count)
+            return (len(self.value.parts) == len(other.value.parts) and
+                    all(ValueKey(a) == ValueKey(b)
+                        for a, b in zip(self.value.parts, other.value.parts)))
         elif isinstance(self.value, ArrayProxy):
             return (ValueKey(self.value.index) == ValueKey(other.value.index) and
                     len(self.value.elems) == len(other.value.elems) and
