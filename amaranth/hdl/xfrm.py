@@ -63,10 +63,6 @@ class ValueVisitor(metaclass=ABCMeta):
         pass # :nocov:
 
     @abstractmethod
-    def on_Repl(self, value):
-        pass # :nocov:
-
-    @abstractmethod
     def on_ArrayProxy(self, value):
         pass # :nocov:
 
@@ -106,8 +102,6 @@ class ValueVisitor(metaclass=ABCMeta):
             new_value = self.on_Part(value)
         elif type(value) is Cat:
             new_value = self.on_Cat(value)
-        elif type(value) is Repl:
-            new_value = self.on_Repl(value)
         elif type(value) is ArrayProxy:
             new_value = self.on_ArrayProxy(value)
         elif type(value) is Sample:
@@ -155,9 +149,6 @@ class ValueTransformer(ValueVisitor):
 
     def on_Cat(self, value):
         return Cat(self.on_value(o) for o in value.parts)
-
-    def on_Repl(self, value):
-        return Repl(self.on_value(value.value), value.count)
 
     def on_ArrayProxy(self, value):
         return ArrayProxy([self.on_value(elem) for elem in value._iter_as_values()],
@@ -301,7 +292,9 @@ class FragmentTransformer:
 
     def __call__(self, value, *, src_loc_at=0):
         if isinstance(value, Fragment):
-            return self.on_fragment(value)
+            f = self.on_fragment(value)
+            f.generated.update(value.generated)
+            return f
         elif isinstance(value, TransformedElaboratable):
             value._transforms_.append(self)
             return value
@@ -373,9 +366,6 @@ class DomainCollector(ValueVisitor, StatementVisitor):
     def on_Cat(self, value):
         for o in value.parts:
             self.on_value(o)
-
-    def on_Repl(self, value):
-        self.on_value(value.value)
 
     def on_ArrayProxy(self, value):
         for elem in value._iter_as_values():
