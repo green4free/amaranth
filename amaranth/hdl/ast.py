@@ -78,11 +78,15 @@ class Shape:
         If ``False``, the value is unsigned. If ``True``, the value is signed two's complement.
     """
     def __init__(self, width=1, signed=False):
-        if not isinstance(width, int) or width < 0:
-            raise TypeError("Width must be a non-negative integer, not {!r}"
-                            .format(width))
+        if not isinstance(width, int):
+            raise TypeError(f"Width must be an integer, not {width!r}")
+        if not signed and width < 0:
+            raise TypeError(f"Width of an unsigned value must be zero or a positive integer, "
+                            f"not {width}")
+        if signed and width <= 0:
+            raise TypeError(f"Width of a signed value must be a positive integer, not {width}")
         self.width = width
-        self.signed = signed
+        self.signed = bool(signed)
 
     # The algorithm for inferring shape for standard Python enumerations is factored out so that
     # `Shape.cast()` and Amaranth's `EnumMeta.as_shape()` can both use it.
@@ -116,7 +120,7 @@ class Shape:
                 return Shape(obj)
             elif isinstance(obj, range):
                 if len(obj) == 0:
-                    return Shape(0, obj.start < 0)
+                    return Shape(0)
                 signed = obj[0] < 0 or obj[-1] < 0
                 width  = max(bits_for(obj[0], signed),
                              bits_for(obj[-1], signed))
@@ -860,9 +864,14 @@ class Part(Value):
         if not isinstance(stride, int) or stride <= 0:
             raise TypeError("Part stride must be a positive integer, not {!r}".format(stride))
 
+        value = Value.cast(value)
+        offset = Value.cast(offset)
+        if offset.shape().signed:
+            raise TypeError("Part offset must be unsigned")
+
         super().__init__(src_loc_at=src_loc_at)
-        self.value  = Value.cast(value)
-        self.offset = Value.cast(offset)
+        self.value  = value
+        self.offset = offset
         self.width  = width
         self.stride = stride
 
@@ -1110,7 +1119,11 @@ class Signal(Value, DUID, metaclass=_SignalMeta):
             new_name = other.name + str(name_suffix)
         else:
             new_name = tracer.get_var_name(depth=2 + src_loc_at, default="$like")
-        kw = dict(shape=Value.cast(other).shape(), name=new_name)
+        if isinstance(other, ValueCastable):
+            shape = other.shape()
+        else:
+            shape = Value.cast(other).shape()
+        kw = dict(shape=shape, name=new_name)
         if isinstance(other, Signal):
             kw.update(reset=other.reset, reset_less=other.reset_less,
                       attrs=other.attrs, decoder=other.decoder)
@@ -1363,6 +1376,9 @@ class ValueCastable:
         if not hasattr(cls, "as_value"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must override "
                             "the `as_value` method")
+        if not hasattr(cls, "shape"):
+            raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must override "
+                            "the `shape` method")
         if not hasattr(cls.as_value, "_ValueCastable__memoized"):
             raise TypeError(f"Class '{cls.__name__}' deriving from `ValueCastable` must decorate "
                             "the `as_value` method with the `ValueCastable.lowermethod` decorator")
