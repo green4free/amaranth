@@ -42,11 +42,20 @@ class ShapeTestCase(FHDLTestCase):
         s3 = Shape(3, True)
         self.assertEqual(s3.width, 3)
         self.assertEqual(s3.signed, True)
+        s4 = Shape(0)
+        self.assertEqual(s4.width, 0)
+        self.assertEqual(s4.signed, False)
 
     def test_make_wrong(self):
         with self.assertRaisesRegex(TypeError,
-                r"^Width must be a non-negative integer, not -1$"):
-            Shape(-1)
+                r"^Width must be an integer, not 'a'$"):
+            Shape("a")
+        with self.assertRaisesRegex(TypeError,
+                r"^Width of an unsigned value must be zero or a positive integer, not -1$"):
+            Shape(-1, signed=False)
+        with self.assertRaisesRegex(TypeError,
+                r"^Width of a signed value must be a positive integer, not 0$"):
+            Shape(0, signed=True)
 
     def test_compare_non_shape(self):
         self.assertNotEqual(Shape(1, True), "hi")
@@ -87,7 +96,7 @@ class ShapeTestCase(FHDLTestCase):
 
     def test_cast_int_wrong(self):
         with self.assertRaisesRegex(TypeError,
-                r"^Width must be a non-negative integer, not -1$"):
+                r"^Width of an unsigned value must be zero or a positive integer, not -1$"):
             Shape.cast(-1)
 
     def test_cast_tuple_wrong(self):
@@ -116,7 +125,7 @@ class ShapeTestCase(FHDLTestCase):
         self.assertEqual(s6.signed, False)
         s7 = Shape.cast(range(-1, -1))
         self.assertEqual(s7.width, 0)
-        self.assertEqual(s7.signed, True)
+        self.assertEqual(s7.signed, False)
         s8 = Shape.cast(range(0, 10, 3))
         self.assertEqual(s8.width, 4)
         self.assertEqual(s8.signed, False)
@@ -386,7 +395,7 @@ class ConstTestCase(FHDLTestCase):
 
     def test_shape_wrong(self):
         with self.assertRaisesRegex(TypeError,
-                r"^Width must be a non-negative integer, not -1$"):
+                r"^Width of an unsigned value must be zero or a positive integer, not -1$"):
             Const(1, -1)
 
     def test_wrong_fencepost(self):
@@ -785,6 +794,11 @@ class BitSelectTestCase(FHDLTestCase):
         s = self.c.bit_select(self.s, 2)
         self.assertEqual(repr(s), "(part (const 8'd0) (sig s) 2 1)")
 
+    def test_offset_wrong(self):
+        with self.assertRaisesRegex(TypeError,
+                r"^Part offset must be unsigned$"):
+            self.c.bit_select(self.s.as_signed(), 1)
+
 
 class WordSelectTestCase(FHDLTestCase):
     def setUp(self):
@@ -816,6 +830,11 @@ class WordSelectTestCase(FHDLTestCase):
     def test_repr(self):
         s = self.c.word_select(self.s, 2)
         self.assertEqual(repr(s), "(part (const 8'd0) (sig s) 2 2)")
+
+    def test_offset_wrong(self):
+        with self.assertRaisesRegex(TypeError,
+                r"^Part offset must be unsigned$"):
+            self.c.word_select(self.s.as_signed(), 1)
 
 
 class CatTestCase(FHDLTestCase):
@@ -1012,7 +1031,7 @@ class SignalTestCase(FHDLTestCase):
 
     def test_shape_wrong(self):
         with self.assertRaisesRegex(TypeError,
-                r"^Width must be a non-negative integer, not -10$"):
+                r"^Width of an unsigned value must be zero or a positive integer, not -10$"):
             Signal(-10)
 
     def test_name(self):
@@ -1183,6 +1202,9 @@ class MockValueCastable(ValueCastable):
     def __init__(self, dest):
         self.dest = dest
 
+    def shape(self):
+        return Value.cast(self.dest).shape()
+
     @ValueCastable.lowermethod
     def as_value(self):
         return self.dest
@@ -1192,6 +1214,9 @@ class MockValueCastableChanges(ValueCastable):
     def __init__(self, width=0):
         self.width = width
 
+    def shape(self):
+        return unsigned(self.width)
+
     @ValueCastable.lowermethod
     def as_value(self):
         return Signal(self.width)
@@ -1200,6 +1225,9 @@ class MockValueCastableChanges(ValueCastable):
 class MockValueCastableCustomGetattr(ValueCastable):
     def __init__(self):
         pass
+
+    def shape(self):
+        assert False
 
     @ValueCastable.lowermethod
     def as_value(self):
@@ -1218,16 +1246,29 @@ class ValueCastableTestCase(FHDLTestCase):
                 def __init__(self):
                     pass
 
+                def shape(self):
+                    pass
+
                 def as_value(self):
                     return Signal()
 
     def test_no_override(self):
         with self.assertRaisesRegex(TypeError,
-                r"^Class 'MockValueCastableNoOverride' deriving from `ValueCastable` must "
+                r"^Class 'MockValueCastableNoOverrideAsValue' deriving from `ValueCastable` must "
                 r"override the `as_value` method$"):
-            class MockValueCastableNoOverride(ValueCastable):
+            class MockValueCastableNoOverrideAsValue(ValueCastable):
                 def __init__(self):
                     pass
+
+        with self.assertRaisesRegex(TypeError,
+                r"^Class 'MockValueCastableNoOverrideShapec' deriving from `ValueCastable` must "
+                r"override the `shape` method$"):
+            class MockValueCastableNoOverrideShapec(ValueCastable):
+                def __init__(self):
+                    pass
+
+                def as_value(self):
+                    return Signal()
 
     def test_memoized(self):
         vc = MockValueCastableChanges(1)
