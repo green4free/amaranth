@@ -869,130 +869,131 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
         # Transform all subfragments to their respective cells. Transforming signals connected
         # to their ports into wires eagerly makes sure they get sensible (prefixed with submodule
         # name) names.
-        memories = OrderedDict()
-        for subfragment, sub_name in fragment.subfragments:
-            if not (subfragment.ports or subfragment.statements or subfragment.subfragments):
-                # If the fragment is completely empty, skip translating it, otherwise synthesis
-                # tools (including Yosys and Vivado) will treat it as a black box when it is
-                # loaded after conversion to Verilog.
-                continue
+        if novel or not pure:
+            memories = OrderedDict()
+            for subfragment, sub_name in fragment.subfragments:
+                if not (subfragment.ports or subfragment.statements or subfragment.subfragments):
+                    # If the fragment is completely empty, skip translating it, otherwise synthesis
+                    # tools (including Yosys and Vivado) will treat it as a black box when it is
+                    # loaded after conversion to Verilog.
+                    continue
 
-            if sub_name is None:
-                sub_name = module.anonymous()
+                if sub_name is None:
+                    sub_name = module.anonymous()
 
-            sub_params = OrderedDict(getattr(subfragment, "parameters", {}))
+                sub_params = OrderedDict(getattr(subfragment, "parameters", {}))
 
-            sub_type, sub_port_map = \
-                _convert_fragment(builder, subfragment, name_map,
-                                  hierarchy=hierarchy + (sub_name,))
+                sub_type, sub_port_map = \
+                    _convert_fragment(builder, subfragment, name_map,
+                                      hierarchy=hierarchy + (sub_name,))
 
-            if sub_type == "$mem_v2" and "MEMID" not in sub_params:
-                sub_params["MEMID"] = builder._make_name(sub_name, local=False)
-            
-            sub_ports = OrderedDict()
-            for port, value in sub_port_map.items():
-                if not isinstance(subfragment, ir.Instance):
-                    for signal in value._rhs_signals():
-                        compiler_state.resolve_curr(signal, prefix=sub_name)
-                if len(value) > 0 or sub_type == "$mem_v2":
-                    sub_ports[port] = rhs_compiler(value)
+                if sub_type == "$mem_v2" and "MEMID" not in sub_params:
+                    sub_params["MEMID"] = builder._make_name(sub_name, local=False)
 
-            module.cell(sub_type, name=sub_name, ports=sub_ports, params=sub_params,
-                        attrs=subfragment.attrs)
+                sub_ports = OrderedDict()
+                for port, value in sub_port_map.items():
+                    if not isinstance(subfragment, ir.Instance):
+                        for signal in value._rhs_signals():
+                            compiler_state.resolve_curr(signal, prefix=sub_name)
+                    if len(value) > 0 or sub_type == "$mem_v2":
+                        sub_ports[port] = rhs_compiler(value)
 
-        # If we emit all of our combinatorial logic into a single RTLIL process, Verilog
-        # simulators will break horribly, because Yosys write_verilog transforms RTLIL processes
-        # into always @* blocks with blocking assignment, and that does not create delta cycles.
-        #
-        # Therefore, we translate the fragment as many times as there are independent groups
-        # of signals (a group is a transitive closure of signals that appear together on LHS),
-        # splitting them into many RTLIL (and thus Verilog) processes.
-        lhs_grouper = xfrm.LHSGroupAnalyzer()
-        lhs_grouper.on_statements(fragment.statements)
+                module.cell(sub_type, name=sub_name, ports=sub_ports, params=sub_params,
+                            attrs=subfragment.attrs)
 
-        for group, group_signals in lhs_grouper.groups().items():
-            lhs_group_filter = xfrm.LHSGroupFilter(group_signals)
-            group_stmts = lhs_group_filter(fragment.statements)
+            # If we emit all of our combinatorial logic into a single RTLIL process, Verilog
+            # simulators will break horribly, because Yosys write_verilog transforms RTLIL processes
+            # into always @* blocks with blocking assignment, and that does not create delta cycles.
+            #
+            # Therefore, we translate the fragment as many times as there are independent groups
+            # of signals (a group is a transitive closure of signals that appear together on LHS),
+            # splitting them into many RTLIL (and thus Verilog) processes.
+            lhs_grouper = xfrm.LHSGroupAnalyzer()
+            lhs_grouper.on_statements(fragment.statements)
 
-            with module.process(name="$group_{}".format(group)) as process:
-                with process.case() as case:
-                    # For every signal in comb domain, assign \sig$next to the reset value.
-                    # For every signal in sync domains, assign \sig$next to the current
-                    # value (\sig).
-                    for domain, signal in fragment.iter_drivers():
-                        if signal not in group_signals:
-                            continue
-                        if domain is None:
-                            prev_value = ast.Const(signal.reset, signal.width)
-                        else:
-                            prev_value = signal
-                        case.assign(lhs_compiler(signal), rhs_compiler(prev_value))
+            for group, group_signals in lhs_grouper.groups().items():
+                lhs_group_filter = xfrm.LHSGroupFilter(group_signals)
+                group_stmts = lhs_group_filter(fragment.statements)
 
-                    # Convert statements into decision trees.
-                    stmt_compiler._case = case
-                    stmt_compiler._has_rhs = False
-                    stmt_compiler._wrap_assign = False
-                    stmt_compiler(group_stmts)
+                with module.process(name="$group_{}".format(group)) as process:
+                    with process.case() as case:
+                        # For every signal in comb domain, assign \sig$next to the reset value.
+                        # For every signal in sync domains, assign \sig$next to the current
+                        # value (\sig).
+                        for domain, signal in fragment.iter_drivers():
+                            if signal not in group_signals:
+                                continue
+                            if domain is None:
+                                prev_value = ast.Const(signal.reset, signal.width)
+                            else:
+                                prev_value = signal
+                            case.assign(lhs_compiler(signal), rhs_compiler(prev_value))
+
+                        # Convert statements into decision trees.
+                        stmt_compiler._case = case
+                        stmt_compiler._has_rhs = False
+                        stmt_compiler._wrap_assign = False
+                        stmt_compiler(group_stmts)
         
-        # For every driven signal in the sync domain, create a flop of appropriate type. Which type
-        # is appropriate depends on the domain: for domains with sync reset, it is a $dff, for
-        # domains with async reset it is an $adff. The latter is directly provided with the reset
-        # value as a parameter to the cell, which is directly assigned during reset.
-        for domain, signal in fragment.iter_sync():
-            cd = fragment.domains[domain]
-
-            wire_clk = compiler_state.resolve_curr(cd.clk)
-            wire_rst = compiler_state.resolve_curr(cd.rst) if cd.rst is not None else None
-            wire_curr, wire_next = compiler_state.resolve(signal)
-
-            if not cd.async_reset:
-                # For sync reset flops, the reset value comes from logic inserted by 
-                # `hdl.xfrm.DomainLowerer`.
-                module.cell("$dff", ports={
-                    "\\CLK": wire_clk,
-                    "\\D": wire_next,
-                    "\\Q": wire_curr
-                }, params={
-                    "CLK_POLARITY": int(cd.clk_edge == "pos"),
-                    "WIDTH": signal.width
-                })
-            else:
-                # For async reset flops, the reset value is provided directly to the cell.
-                module.cell("$adff", ports={
-                    "\\ARST": wire_rst,
-                    "\\CLK": wire_clk,
-                    "\\D": wire_next,
-                    "\\Q": wire_curr
-                }, params={
-                    "ARST_POLARITY": ast.Const(1),
-                    "ARST_VALUE": ast.Const(signal.reset, signal.width),
-                    "CLK_POLARITY": int(cd.clk_edge == "pos"),
-                    "WIDTH": signal.width
-                })
-
-        # Any signals that are used but neither driven nor connected to an input port always
-        # assume their reset values. We need to assign the reset value explicitly, since only
-        # driven sync signals are handled by the logic above.
-        #
-        # Because this assignment is done at a late stage, a single Signal object can get assigned
-        # many times, once in each module it is used. This is a deliberate decision; the possible
-        # alternatives are to add ports for undriven signals (which requires choosing one module
-        # to drive it to reset value arbitrarily) or to replace them with their reset value (which
-        # removes valuable source location information).
-        driven = ast.SignalSet()
-        for domain, signals in fragment.iter_drivers():
-            driven.update(flatten(signal._lhs_signals() for signal in signals))
-        driven.update(fragment.iter_ports(dir="i"))
-        driven.update(fragment.iter_ports(dir="io"))
-        for subfragment, sub_name in fragment.subfragments:
-            driven.update(subfragment.iter_ports(dir="o"))
-            driven.update(subfragment.iter_ports(dir="io"))
-
-        for wire in compiler_state.wires:
-            if wire in driven:
-                continue
-            wire_curr, _ = compiler_state.wires[wire]
-            module.connect(wire_curr, rhs_compiler(ast.Const(wire.reset, wire.width)))
+            # For every driven signal in the sync domain, create a flop of appropriate type. Which type
+            # is appropriate depends on the domain: for domains with sync reset, it is a $dff, for
+            # domains with async reset it is an $adff. The latter is directly provided with the reset
+            # value as a parameter to the cell, which is directly assigned during reset.
+            for domain, signal in fragment.iter_sync():
+                cd = fragment.domains[domain]
+    
+                wire_clk = compiler_state.resolve_curr(cd.clk)
+                wire_rst = compiler_state.resolve_curr(cd.rst) if cd.rst is not None else None
+                wire_curr, wire_next = compiler_state.resolve(signal)
+    
+                if not cd.async_reset:
+                    # For sync reset flops, the reset value comes from logic inserted by 
+                    # `hdl.xfrm.DomainLowerer`.
+                    module.cell("$dff", ports={
+                        "\\CLK": wire_clk,
+                        "\\D": wire_next,
+                        "\\Q": wire_curr
+                    }, params={
+                        "CLK_POLARITY": int(cd.clk_edge == "pos"),
+                        "WIDTH": signal.width
+                    })
+                else:
+                    # For async reset flops, the reset value is provided directly to the cell.
+                    module.cell("$adff", ports={
+                        "\\ARST": wire_rst,
+                        "\\CLK": wire_clk,
+                        "\\D": wire_next,
+                        "\\Q": wire_curr
+                    }, params={
+                        "ARST_POLARITY": ast.Const(1),
+                        "ARST_VALUE": ast.Const(signal.reset, signal.width),
+                        "CLK_POLARITY": int(cd.clk_edge == "pos"),
+                        "WIDTH": signal.width
+                    })
+    
+            # Any signals that are used but neither driven nor connected to an input port always
+            # assume their reset values. We need to assign the reset value explicitly, since only
+            # driven sync signals are handled by the logic above.
+            #
+            # Because this assignment is done at a late stage, a single Signal object can get assigned
+            # many times, once in each module it is used. This is a deliberate decision; the possible
+            # alternatives are to add ports for undriven signals (which requires choosing one module
+            # to drive it to reset value arbitrarily) or to replace them with their reset value (which
+            # removes valuable source location information).
+            driven = ast.SignalSet()
+            for domain, signals in fragment.iter_drivers():
+                driven.update(flatten(signal._lhs_signals() for signal in signals))
+            driven.update(fragment.iter_ports(dir="i"))
+            driven.update(fragment.iter_ports(dir="io"))
+            for subfragment, sub_name in fragment.subfragments:
+                driven.update(subfragment.iter_ports(dir="o"))
+                driven.update(subfragment.iter_ports(dir="io"))
+    
+            for wire in compiler_state.wires:
+                if wire in driven:
+                    continue
+                wire_curr, _ = compiler_state.wires[wire]
+                module.connect(wire_curr, rhs_compiler(ast.Const(wire.reset, wire.width)))
 
     # Collect the names we've given to our ports in RTLIL, and correlate these with the signals
     # represented by these ports. If we are a submodule, this will be necessary to create a cell
