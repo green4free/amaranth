@@ -77,15 +77,17 @@ class _Namer:
 
 
 class _BufferedBuilder:
-    def __init__(self):
+    def __init__(self, fake = False):
         super().__init__()
+        self.fake = fake
         self._buffer = io.StringIO()
 
     def __str__(self):
         return self._buffer.getvalue()
 
     def _append(self, fmt, *args, **kwargs):
-        self._buffer.write(fmt.format(*args, **kwargs))
+        if not self.fake:
+            self._buffer.write(fmt.format(*args, **kwargs))
 
 
 class _ProxiedBuilder:
@@ -114,14 +116,15 @@ class _Builder(_BufferedBuilder, _Namer):
         super().__init__()
         self.emit_src = emit_src
 
-    def module(self, name=None, attrs={}):
+    def module(self, name=None, attrs={}, fake=False):
         name = self._make_name(name, local=False)
-        return _ModuleBuilder(self, name, attrs)
+        return _ModuleBuilder(self, name, attrs, fake=fake)
 
 
 class _ModuleBuilder(_AttrBuilder, _BufferedBuilder, _Namer):
-    def __init__(self, rtlil, name, attrs):
+    def __init__(self, rtlil, name, attrs, fake=False):
         super().__init__(emit_src=rtlil.emit_src)
+        self.fake = fake
         self.rtlil = rtlil
         self.name  = name
         self.attrs = {"generator": "Amaranth"}
@@ -198,6 +201,7 @@ class _ProcessBuilder(_AttrBuilder, _BufferedBuilder):
     def __init__(self, rtlil, name, attrs, src):
         super().__init__(emit_src=rtlil.emit_src)
         self.rtlil = rtlil
+        self.fake = rtlil.fake
         self.name  = name
         self.attrs = {}
         self.src   = src
@@ -809,6 +813,8 @@ class _StatementCompiler(xfrm.StatementVisitor):
             self.on_statement(stmt)
 
 
+pureFragmentCache = {}
+
 def _convert_fragment(builder, fragment, name_map, hierarchy):
     if isinstance(fragment, ir.Instance):
         port_map = OrderedDict()
@@ -820,13 +826,22 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
         else:
             return "\\{}".format(fragment.type), port_map
 
+    pure = False
+    novel = True
+    s = None
+    if "p_signature" in fragment.generated:
+        pure = True
+        s = fragment.generated["p_signature"]
+        if s in pureFragmentCache:
+            novel = False
+
     module_name  = hierarchy[-1] or "anonymous"
     module_attrs = OrderedDict()
     if len(hierarchy) == 1:
         module_attrs["top"] = 1
     module_attrs["amaranth.hierarchy"] = ".".join(name or "anonymous" for name in hierarchy)
 
-    with builder.module(module_name, attrs=module_attrs) as module:
+    with builder.module(module_name, attrs=module_attrs, fake=not novel) as module:
         compiler_state = _ValueCompilerState(module)
         rhs_compiler   = _RHSValueCompiler(compiler_state)
         lhs_compiler   = _LHSValueCompiler(compiler_state)
@@ -994,6 +1009,11 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
             wire_name = wire_name[1:]
         name_map[signal] = hierarchy + (wire_name,)
 
+    if pure:
+        if novel:
+            pureFragmentCache[s] = module.name
+        else:
+            return pureFragmentCache[s], port_map
     return module.name, port_map
 
 

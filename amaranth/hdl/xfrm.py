@@ -291,7 +291,9 @@ class FragmentTransformer:
 
     def __call__(self, value, *, src_loc_at=0):
         if isinstance(value, Fragment):
-            return self.on_fragment(value)
+            f = self.on_fragment(value)
+            f.generated.update(value.generated)
+            return f
         elif isinstance(value, TransformedElaboratable):
             value._transforms_.append(self)
             return value
