@@ -245,8 +245,9 @@ class StatementTransformer(StatementVisitor):
 
 class FragmentTransformer:
     def map_subfragments(self, fragment, new_fragment):
-        for subfragment, name in fragment.subfragments:
-            new_fragment.add_subfragment(self(subfragment), name)
+        new_fragment.subfragments.extend((self(subfragment), name) for subfragment, name in fragment.subfragments) #
+        #for subfragment, name in fragment.subfragments:
+        #    new_fragment.add_subfragment(self(subfragment), name)
 
     def map_ports(self, fragment, new_fragment):
         for port, dir in fragment.ports.items():

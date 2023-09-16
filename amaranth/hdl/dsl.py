@@ -2,6 +2,7 @@ from collections import OrderedDict
 from contextlib import contextmanager, _GeneratorContextManager
 from functools import wraps
 from enum import Enum
+from genericpath import exists
 import warnings
 import sys
 from typing import Hashable
@@ -533,12 +534,21 @@ class Module(_ModuleBuilderRoot, Elaboratable):
         while self._ctrl_stack:
             self._pop_ctrl()
     
+    __pureIds = set()
+
     def setPureIdentifier(self, *id):
         assert isinstance(id, Hashable), "New pureIdentifier is not hashable"
         self._generated["p_signature"] = id
+        e = id in self.__class__.__pureIds
+        self.__class__.__pureIds.add(id)
+        return e
 
     def unsetPureIdentifier(self):
+        id = self._generated.get("p_signature", None)
+        if id != None:
+            self.__class__.__pureIds.pop(id)
         self._generated.pop("p_signature", None)
+        
 
     def elaborate(self, platform):
         self._flush()

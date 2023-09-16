@@ -817,9 +817,9 @@ pureFragmentCache = {}
 
 def _convert_fragment(builder, fragment, name_map, hierarchy):
     if isinstance(fragment, ir.Instance):
-        port_map = OrderedDict()
-        for port_name, (value, dir) in fragment.named_ports.items():
-            port_map["\\{}".format(port_name)] = value
+        port_map = OrderedDict(("\\{}".format(port_name), value) for port_name, (value, dir) in fragment.named_ports.items())
+        #for port_name, (value, dir) in fragment.named_ports.items():
+        #    port_map["\\{}".format(port_name)] = value
 
         if fragment.type[0] == "$":
             return fragment.type, port_map
@@ -842,6 +842,10 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
     module_attrs["amaranth.hierarchy"] = ".".join(name or "anonymous" for name in hierarchy)
 
     with builder.module(module_name, attrs=module_attrs, fake=not novel) as module:
+
+        if pure and novel:
+            pureFragmentCache[s] = module.name
+
         compiler_state = _ValueCompilerState(module)
         rhs_compiler   = _RHSValueCompiler(compiler_state)
         lhs_compiler   = _LHSValueCompiler(compiler_state)
@@ -998,10 +1002,15 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
     # Collect the names we've given to our ports in RTLIL, and correlate these with the signals
     # represented by these ports. If we are a submodule, this will be necessary to create a cell
     # for us in the parent module.
-    port_map = OrderedDict()
-    for signal in fragment.ports:
-        port_map[compiler_state.resolve_curr(signal)] = signal
+    #port_map = OrderedDict()
+    #for signal in fragment.ports:
+    #    port_map[compiler_state.resolve_curr(signal)] = signal
+    
+    port_map = OrderedDict((compiler_state.resolve_curr(signal), signal) for signal in fragment.ports)
 
+    if pure and not novel:
+            return pureFragmentCache[s], port_map
+    
     # Finally, collect the names we've given to each wire in RTLIL, and provide these to
     # the caller, to allow manipulating them in the toolchain.
     for signal in compiler_state.wires:
@@ -1010,11 +1019,6 @@ def _convert_fragment(builder, fragment, name_map, hierarchy):
             wire_name = wire_name[1:]
         name_map[signal] = hierarchy + (wire_name,)
 
-    if pure:
-        if novel:
-            pureFragmentCache[s] = module.name
-        else:
-            return pureFragmentCache[s], port_map
     return module.name, port_map
 
 

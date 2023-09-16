@@ -126,10 +126,16 @@ class Fragment:
     def iter_domains(self):
         yield from self.domains
 
+    @staticmethod
+    def __set_MustUse__used_and_ret(stmt):
+        stmt._MustUse__used = True
+        return stmt
+
     def add_statements(self, *stmts):
-        for stmt in Statement.cast(stmts):
-            stmt._MustUse__used = True
-            self.statements.append(stmt)
+        self.statements.extend(map(Fragment.__set_MustUse__used_and_ret, Statement.cast(stmts)))
+        #for stmt in Statement.cast(stmts):
+        #    stmt._MustUse__used = True
+        #    self.statements.append(stmt)
 
     def add_subfragment(self, subfragment, name=None):
         assert isinstance(subfragment, Fragment)
