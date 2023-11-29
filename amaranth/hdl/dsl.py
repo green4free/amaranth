@@ -536,6 +536,10 @@ class Module(_ModuleBuilderRoot, Elaboratable):
     
     __pureIds = set()
 
+    @classmethod
+    def resetPureIdentifiers(cls):
+        cls.__pureIds.clear()
+
     def setPureIdentifier(self, *id):
         assert isinstance(id, Hashable), "New pureIdentifier is not hashable"
         self._generated["p_signature"] = id
