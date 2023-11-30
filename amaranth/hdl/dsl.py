@@ -14,6 +14,7 @@ from .ast import *
 from .ir import *
 from .cd import *
 from .xfrm import *
+from ..back import rtlil
 
 
 __all__ = ["SyntaxError", "SyntaxWarning", "Module"]
@@ -539,6 +540,8 @@ class Module(_ModuleBuilderRoot, Elaboratable):
     @classmethod
     def resetPureIdentifiers(cls):
         cls.__pureIds.clear()
+        rtlil.pureFragmentCache.clear()
+
 
     def setPureIdentifier(self, *id):
         assert isinstance(id, Hashable), "New pureIdentifier is not hashable"
