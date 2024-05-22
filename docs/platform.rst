@@ -1,3 +1,5 @@
+.. _platform:
+
 Platform integration
 ####################
 
@@ -8,10 +10,9 @@ Platform integration
 .. toctree::
    :maxdepth: 2
 
+   platform/altera
    platform/gowin
-   platform/intel
-   platform/lattice-ecp5
-   platform/lattice-ice40
-   platform/lattice-machxo-2-3l
+   platform/lattice
    platform/quicklogic
+   platform/siliconblue
    platform/xilinx

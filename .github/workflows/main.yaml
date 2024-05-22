@@ -15,29 +15,24 @@ jobs:
         - '3.9'
         - '3.10'
         - '3.11'
+        - '3.12'
         - 'pypy-3.8'
         - 'pypy-3.9'
+        - 'pypy-3.10'
         allow-failure:
         - false
         include:
-        - python-version: '3.12-dev'
+        - python-version: '3.13-dev'
           allow-failure: true
-    continue-on-error: '${{ matrix.allow-failure }}'
+    continue-on-error: ${{ matrix.allow-failure }}
     name: 'test (${{ matrix.python-version }})'
     steps:
-    - name: Preserve Wasm cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cache/wasmtime
-          ~/.cache/YoWASP
-        key: ${{ runner.os }}-wasm
     - name: Check out source code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: Set up PDM
-      uses: pdm-project/setup-pdm@v3
+      uses: pdm-project/setup-pdm@v4
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -46,43 +41,62 @@ jobs:
         sudo add-apt-repository 'deb http://ppa.launchpad.net/sri-csl/formal-methods/ubuntu bionic main'
         sudo apt-get update
         sudo apt-get install yices2
-        pip install codecov yowasp-yosys
+        pip install codecov build
         pdm install --dev
+    - name: Cache YoWASP build products
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/YoWASP
+        key: YoWASP-${{ runner.os }}-${{ hashFiles('./.venv/**/*.wasm') }}
+        restore-keys: |
+          YoWASP-${{ runner.os }}-
     - name: Run tests
-      env:
-        YOSYS: yowasp-yosys
-        NEXTPNR_ICE40: yowasp-nextpnr-ice40
-        ICEPACK: yowasp-icepack
-        SBY: yowasp-sby
-        SMTBMC: yowasp-yosys-smtbmc
       run: |
         pdm run test
     - name: Submit code coverage
-      run:
+      run: |
         codecov
 
-  document:
+  smoketest: # If we plug this into downstream projects, does magic smoke escape?
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - amaranth-lang/amaranth-boards
+          - amaranth-lang/amaranth-stdio
+          - amaranth-lang/amaranth-soc
+    name: 'smoke (${{ matrix.project }})'
     steps:
-      - name: Check out source code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-      - name: Fetch tags from upstream repository
-        run: |
-          git fetch --tags https://github.com/amaranth-lang/amaranth.git
-      - name: Set up PDM
-        uses: pdm-project/setup-pdm@v3
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          pdm install --dev
-      - name: Build documentation
-        run: |
-          pdm run document
-      - name: Upload documentation archive
-        uses: actions/upload-artifact@v3
-        with:
-          name: docs
-          path: docs/_build
+    - name: Check out Amaranth source code
+      uses: actions/checkout@v4
+      with:
+        path: amaranth
+        fetch-depth: 0
+    - name: Check out source code
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ matrix.project }}
+        path: project
+        fetch-depth: 0
+    - name: Set up PDM
+      uses: pdm-project/setup-pdm@v4
+    - name: Install dependencies
+      working-directory: project
+      run: |
+        pdm install --dev
+    - name: Use Amaranth HEAD revision
+      working-directory: project
+      run: |
+        pdm add ../amaranth
+    - name: Cache YoWASP build products
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/YoWASP
+        key: YoWASP-${{ runner.os }}-${{ hashFiles('./.venv/**/*.wasm') }}
+        restore-keys: |
+          YoWASP-${{ runner.os }}-
+    - name: Run tests
+      working-directory: project
+      run: |
+        pdm run test

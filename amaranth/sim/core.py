@@ -2,54 +2,21 @@ import inspect
 import warnings
 
 from .._utils import deprecated
-from ..hdl.cd import *
-from ..hdl.ir import *
+from ..hdl._cd import *
+from ..hdl._ir import *
+from ..hdl._ast import Value, ValueLike
+from ..hdl._mem import MemoryData
 from ._base import BaseEngine
+from ._async import DomainReset, BrokenTrigger
+from ._pycoro import Tick, Settle, Delay, Passive, Active, coro_wrapper
 
 
-__all__ = ["Settle", "Delay", "Tick", "Passive", "Active", "Simulator"]
-
-
-class Command:
-    pass
-
-
-class Settle(Command):
-    def __repr__(self):
-        return "(settle)"
-
-
-class Delay(Command):
-    def __init__(self, interval=None):
-        self.interval = None if interval is None else float(interval)
-
-    def __repr__(self):
-        if self.interval is None:
-            return "(delay ε)"
-        else:
-            return "(delay {:.3}us)".format(self.interval * 1e6)
-
-
-class Tick(Command):
-    def __init__(self, domain="sync"):
-        if not isinstance(domain, (str, ClockDomain)):
-            raise TypeError("Domain must be a string or a ClockDomain instance, not {!r}"
-                            .format(domain))
-        assert domain != "comb"
-        self.domain = domain
-
-    def __repr__(self):
-        return "(tick {})".format(self.domain)
-
-
-class Passive(Command):
-    def __repr__(self):
-        return "(passive)"
-
-
-class Active(Command):
-    def __repr__(self):
-        return "(active)"
+__all__ = [
+    "DomainReset", "BrokenTrigger",
+    "Simulator",
+    # deprecated
+    "Settle", "Delay", "Tick", "Passive", "Active",
+]
 
 
 class Simulator:
@@ -64,8 +31,8 @@ class Simulator:
                             "a simulation engine name"
                             .format(engine))
 
-        self._fragment = Fragment.get(fragment, platform=None).prepare()
-        self._engine   = engine(self._fragment)
+        self._design   = Fragment.get(fragment, platform=None).prepare()
+        self._engine   = engine(self._design)
         self._clocked  = set()
 
     def _check_process(self, process):
@@ -76,20 +43,51 @@ class Simulator:
 
     def add_process(self, process):
         process = self._check_process(process)
-        def wrapper():
-            # Only start a bench process after comb settling, so that the reset values are correct.
-            yield Settle()
-            yield from process()
-        self._engine.add_coroutine_process(wrapper, default_cmd=None)
+        if inspect.iscoroutinefunction(process):
+            self._engine.add_async_process(self, process)
+        else:
+            def wrapper():
+                # Only start a bench process after comb settling, so that the initial values are correct.
+                yield Active()
+                yield object.__new__(Settle)
+                yield from process()
+            wrap_process = coro_wrapper(wrapper, testbench=False)
+            self._engine.add_async_process(self, wrap_process)
 
+    def add_testbench(self, process, *, background=False):
+        if inspect.iscoroutinefunction(process):
+            self._engine.add_async_testbench(self, process, background=background)
+        else:
+            process = coro_wrapper(process, testbench=True)
+            self._engine.add_async_testbench(self, process, background=background)
+
+    @deprecated("The `add_sync_process` method is deprecated per RFC 27. Use `add_process` or `add_testbench` instead.")
     def add_sync_process(self, process, *, domain="sync"):
         process = self._check_process(process)
         def wrapper():
             # Only start a sync process after the first clock edge (or reset edge, if the domain
             # uses an asynchronous reset). This matches the behavior of synchronous FFs.
+            generator = process()
+            result = None
+            exception = None
+            yield Active()
             yield Tick(domain)
-            yield from process()
-        self._engine.add_coroutine_process(wrapper, default_cmd=Tick(domain))
+            while True:
+                try:
+                    if exception is None:
+                        command = generator.send(result)
+                    else:
+                        command = generator.throw(exception)
+                except StopIteration:
+                    break
+                try:
+                    result = yield command
+                    exception = None
+                except Exception as e:
+                    result = None
+                    exception = e
+        wrap_process = coro_wrapper(wrapper, testbench=False, default_cmd=Tick(domain))
+        self._engine.add_async_process(self, wrap_process)
 
     def add_clock(self, period, *, phase=None, domain="sync", if_exists=False):
         """Add a clock process.
@@ -113,15 +111,15 @@ class Simulator:
             in this case.
         """
         if isinstance(domain, ClockDomain):
-            if (domain.name in self._fragment.domains and
-                    domain is not self._fragment.domains[domain.name]):
+            if (domain.name in self._design.fragment.domains and
+                    domain is not self._design.fragment.domains[domain.name]):
                 warnings.warn("Adding a clock process that drives a clock domain object "
                               "named {!r}, which is distinct from an identically named domain "
                               "in the simulated design"
                               .format(domain.name),
                               UserWarning, stacklevel=2)
-        elif domain in self._fragment.domains:
-            domain = self._fragment.domains[domain]
+        elif domain in self._design.fragment.domains:
+            domain = self._design.fragment.domains[domain]
         elif if_exists:
             return
         else:
@@ -130,24 +128,24 @@ class Simulator:
         if domain in self._clocked:
             raise ValueError("Domain {!r} already has a clock driving it"
                              .format(domain.name))
-        
-        # We represent times internally in 1 ps units, but users supply float quantities of seconds
-        period = int(period * 1e12)
+
+        # We represent times internally in 1 fs units, but users supply float quantities of seconds
+        period = int(period * 1e15)
 
         if phase is None:
             # By default, delay the first edge by half period. This causes any synchronous activity
-            # to happen at a non-zero time, distinguishing it from the reset values in the waveform
+            # to happen at a non-zero time, distinguishing it from the initial values in the waveform
             # viewer.
             phase = period // 2
         else:
-            phase = int(phase * 1e12) + period // 2
+            phase = int(phase * 1e15) + period // 2
         self._engine.add_clock_process(domain.clk, phase=phase, period=period)
         self._clocked.add(domain)
 
     def reset(self):
         """Reset the simulation.
 
-        Assign the reset value to every signal in the simulation, and restart every user process.
+        Assign the initial value to every signal and memory in the simulation, and restart every user process.
         """
         self._engine.reset()
 
@@ -155,7 +153,7 @@ class Simulator:
         """Advance the simulation.
 
         Run every process and commit changes until a fixed point is reached, then advance time
-        to the closest deadline (if any). If there is an unstable combinatorial loop,
+        to the closest deadline (if any). If there is an unstable combinational loop,
         this function will never return.
 
         Returns ``True`` if there are any active processes, ``False`` otherwise.
@@ -181,13 +179,13 @@ class Simulator:
 
         If the simulation stops advancing, this function will never return.
         """
-        # Convert deadline in seconds into internal 1 ps units
-        deadline = deadline * 1e12
+        # Convert deadline in seconds into internal 1 fs units
+        deadline = deadline * 1e15
         assert self._engine.now <= deadline
         while (self.advance() or run_passive) and self._engine.now < deadline:
             pass
 
-    def write_vcd(self, vcd_file, gtkw_file=None, *, traces=()):
+    def write_vcd(self, vcd_file, gtkw_file=None, *, traces=(), fs_per_delta=0):
         """Write waveforms to a Value Change Dump file, optionally populating a GTKWave save file.
 
         This method returns a context manager. It can be used as: ::
@@ -212,4 +210,17 @@ class Simulator:
                     file.close()
             raise ValueError("Cannot start writing waveforms after advancing simulation time")
 
-        return self._engine.write_vcd(vcd_file=vcd_file, gtkw_file=gtkw_file, traces=traces)
+        for trace in traces:
+            if isinstance(trace, ValueLike):
+                trace_cast = Value.cast(trace)
+                if isinstance(trace_cast, MemoryData._Row):
+                    continue
+                for trace_signal in trace_cast._rhs_signals():
+                    if trace_signal.name == "":
+                        if trace_signal is trace:
+                            raise TypeError("Cannot trace signal with private name")
+                        else:
+                            raise TypeError(f"Cannot trace signal with private name (within {trace!r})")
+
+        return self._engine.write_vcd(vcd_file=vcd_file, gtkw_file=gtkw_file,
+                                      traces=traces, fs_per_delta=fs_per_delta)

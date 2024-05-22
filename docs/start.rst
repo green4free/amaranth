@@ -1,7 +1,7 @@
 Getting started
 ###############
 
-This section demonstrates the basic Amaranth workflow to provide a cursory overview of the language and the toolchain. See the :doc:`tutorial <tutorial>` for a step-by-step introduction to the language, and the :doc:`language guide <lang>` for a detailed explanation of every language construct.
+This section demonstrates the basic Amaranth workflow to provide a cursory overview of the language and the toolchain. See the :doc:`tutorial <tutorial>` for a step-by-step introduction to the language, and the :doc:`language guide <guide>` for a detailed explanation of every language construct.
 
 .. TODO: add link to build system doc
 .. TODO: add link to more complex examples?
@@ -27,11 +27,11 @@ A 16-bit up counter with enable input, overflow output, and a limit fixed at des
    :lineno-match:
    :end-before: # --- TEST ---
 
-The reusable building block of Amaranth designs is an ``Elaboratable``: a Python class that includes HDL signals (``en`` and ``ovf``, in this case) as a part of its interface, and provides the ``elaborate`` method that defines its behavior.
+The reusable building block of Amaranth designs is a ``Component``: a Python class declares its interface (``en`` and ``ovf``, in this case) and implements the ``elaborate`` method that defines its behavior.
 
 .. TODO: link to Elaboratable reference
 
-Most ``elaborate`` implementations use a ``Module`` helper to describe combinatorial (``m.d.comb``) and synchronous (``m.d.sync``) logic controlled with conditional syntax (``m.If``, ``m.Elif``, ``m.Else``) similar to Python's. They can also instantiate vendor-defined black boxes or modules written in other HDLs.
+Most ``elaborate`` implementations use a ``Module`` helper to describe combinational (``m.d.comb``) and synchronous (``m.d.sync``) logic controlled with conditional syntax (``m.If``, ``m.Elif``, ``m.Else``) similar to Python's. They can also instantiate vendor-defined black boxes or modules written in other HDLs.
 
 .. TODO: link to DSL reference
 

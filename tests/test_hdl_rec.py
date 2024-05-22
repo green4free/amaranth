@@ -2,10 +2,11 @@ import warnings
 
 from enum import Enum
 
-from amaranth.hdl.ast import *
+from amaranth.hdl._ast import *
 with warnings.catch_warnings():
     warnings.filterwarnings(action="ignore", category=DeprecationWarning)
     from amaranth.hdl.rec import *
+from amaranth._utils import _ignore_deprecated
 
 from .utils import *
 
@@ -194,20 +195,6 @@ class RecordTestCase(FHDLTestCase):
         r4 = Record.like(r1, name_suffix="foo")
         self.assertEqual(r4.name, "r1foo")
 
-    def test_like_modifications(self):
-        r1 = Record([("a", 1), ("b", [("s", 1)])])
-        self.assertEqual(r1.a.name, "r1__a")
-        self.assertEqual(r1.b.name, "r1__b")
-        self.assertEqual(r1.b.s.name, "r1__b__s")
-        r1.a.reset = 1
-        r1.b.s.reset = 1
-        r2 = Record.like(r1)
-        self.assertEqual(r2.a.reset, 1)
-        self.assertEqual(r2.b.s.reset, 1)
-        self.assertEqual(r2.a.name, "r2__a")
-        self.assertEqual(r2.b.name, "r2__b")
-        self.assertEqual(r2.b.s.name, "r2__b__s")
-
     def test_slice_tuple(self):
         r1 = Record([("a", 1), ("b", 2), ("c", 3)])
         r2 = r1["a", "c"]
@@ -217,7 +204,7 @@ class RecordTestCase(FHDLTestCase):
 
     def test_enum_decoder(self):
         r1 = Record([("a", UnsignedEnum)])
-        self.assertEqual(r1.a.decoder(UnsignedEnum.FOO), "FOO/1")
+        self.assertRepr(r1.a._format, "(format-enum (sig r1__a) 'UnsignedEnum' (1 'FOO') (2 'BAR') (3 'BAZ'))")
 
     def test_operators(self):
         r1 = Record([("a", 1)])
@@ -285,22 +272,22 @@ class RecordTestCase(FHDLTestCase):
         # __eq__, __ne__, __lt__, __le__, __gt__, __ge__
         self.assertEqual(repr(r1 == 1),  "(== (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 == s1), "(== (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 == r1), "(== (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 == r1), "(== (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 != 1),  "(!= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 != s1), "(!= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 != r1), "(!= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 != r1), "(!= (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 < 1),   "(< (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 < s1),  "(< (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 < r1),  "(< (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 < r1),  "(> (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 <= 1),  "(<= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 <= s1), "(<= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 <= r1), "(<= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 <= r1), "(>= (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 > 1),   "(> (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 > s1),  "(> (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 > r1),  "(> (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 > r1),  "(< (cat (sig r1__a)) (sig s1))")
         self.assertEqual(repr(r1 >= 1),  "(>= (cat (sig r1__a)) (const 1'd1))")
         self.assertEqual(repr(r1 >= s1), "(>= (cat (sig r1__a)) (sig s1))")
-        self.assertEqual(repr(s1 >= r1), "(>= (sig s1) (cat (sig r1__a)))")
+        self.assertEqual(repr(s1 >= r1), "(<= (cat (sig r1__a)) (sig s1))")
 
         # __abs__, __len__
         self.assertEqual(repr(abs(r1)), "(cat (sig r1__a))")
@@ -313,8 +300,9 @@ class RecordTestCase(FHDLTestCase):
         self.assertEqual(repr(r1.any()),         "(r| (cat (sig r1__a)))")
         self.assertEqual(repr(r1.all()),         "(r& (cat (sig r1__a)))")
         self.assertEqual(repr(r1.xor()),         "(r^ (cat (sig r1__a)))")
-        self.assertEqual(repr(r1.implies(1)),    "(| (~ (cat (sig r1__a))) (const 1'd1))")
-        self.assertEqual(repr(r1.implies(s1)),   "(| (~ (cat (sig r1__a))) (sig s1))")
+        with _ignore_deprecated():
+            self.assertEqual(repr(r1.implies(1)),    "(| (~ (cat (sig r1__a))) (const 1'd1))")
+            self.assertEqual(repr(r1.implies(s1)),   "(| (~ (cat (sig r1__a))) (sig s1))")
 
         # bit_select, word_select, matches,
         self.assertEqual(repr(r1.bit_select(0, 1)),  "(slice (cat (sig r1__a)) 0:1)")

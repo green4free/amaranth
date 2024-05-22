@@ -1,125 +1,130 @@
 import inspect
 
+from .._utils import deprecated
 from ..hdl import *
-from ..hdl.ast import Statement, SignalSet
-from .core import Tick, Settle, Delay, Passive, Active
-from ._base import BaseProcess
-from ._pyrtl import _ValueCompiler, _RHSValueCompiler, _StatementCompiler
+from ..hdl._ast import Assign, ValueCastable
 
 
-__all__ = ["PyCoroProcess"]
+__all__ = ["Command", "Settle", "Delay", "Tick", "Passive", "Active", "PyCoroProcess"]
 
 
-class PyCoroProcess(BaseProcess):
-    def __init__(self, state, domains, constructor, *, default_cmd=None):
-        self.state = state
-        self.domains = domains
-        self.constructor = constructor
-        self.default_cmd = default_cmd
+class Command:
+    pass
 
-        self.reset()
 
-    def reset(self):
-        self.runnable = True
-        self.passive = False
+class Settle(Command):
+    @deprecated("The `Settle` command is deprecated per RFC 27. Use `add_testbench` to write "
+                "testbenches; in them, an equivalent of `yield Settle()` is performed "
+                "automatically.")
+    def __init__(self):
+        pass
 
-        self.coroutine = self.constructor()
-        self.exec_locals = {
-            "slots": self.state.slots,
-            "result": None,
-            **_ValueCompiler.helpers
-        }
-        self.waits_on = SignalSet()
+    def __repr__(self):
+        return "(settle)"
 
-    def src_loc(self):
-        coroutine = self.coroutine
-        if coroutine is None:
-            return None
-        while coroutine.gi_yieldfrom is not None and inspect.isgenerator(coroutine.gi_yieldfrom):
-            coroutine = coroutine.gi_yieldfrom
-        if inspect.isgenerator(coroutine):
-            frame = coroutine.gi_frame
-        if inspect.iscoroutine(coroutine):
-            frame = coroutine.cr_frame
-        return "{}:{}".format(inspect.getfile(frame), inspect.getlineno(frame))
 
-    def add_trigger(self, signal, trigger=None):
-        self.state.add_trigger(self, signal, trigger=trigger)
-        self.waits_on.add(signal)
+class Delay(Command):
+    def __init__(self, interval=None):
+        self.interval = None if interval is None else float(interval)
 
-    def clear_triggers(self):
-        for signal in self.waits_on:
-            self.state.remove_trigger(self, signal)
-        self.waits_on.clear()
+    def __repr__(self):
+        if self.interval is None:
+            return "(delay ε)"
+        else:
+            return f"(delay {self.interval * 1e6:.3}us)"
 
-    def run(self):
-        if self.coroutine is None:
-            return
 
-        self.clear_triggers()
+class Tick(Command):
+    def __init__(self, domain="sync"):
+        if not isinstance(domain, (str, ClockDomain)):
+            raise TypeError("Domain must be a string or a ClockDomain instance, not {!r}"
+                            .format(domain))
+        assert domain != "comb"
+        self.domain = domain
+
+    def __repr__(self):
+        return f"(tick {self.domain})"
+
+
+class Passive(Command):
+    def __repr__(self):
+        return "(passive)"
+
+
+class Active(Command):
+    def __repr__(self):
+        return "(active)"
+
+
+def coro_wrapper(process, *, testbench, default_cmd=None):
+    async def inner(context):
+        def src_loc(coroutine):
+            if coroutine is None:
+                return None
+            while coroutine.gi_yieldfrom is not None and inspect.isgenerator(coroutine.gi_yieldfrom):
+                coroutine = coroutine.gi_yieldfrom
+            if inspect.isgenerator(coroutine):
+                frame = coroutine.gi_frame
+            if inspect.iscoroutine(coroutine):
+                frame = coroutine.cr_frame
+            return f"{inspect.getfile(frame)}:{inspect.getlineno(frame)}"
+
+        coroutine = process()
 
         response = None
+        exception = None
         while True:
             try:
-                command = self.coroutine.send(response)
+                if exception is None:
+                    command = coroutine.send(response)
+                else:
+                    command = coroutine.throw(exception)
+            except StopIteration:
+                return
+
+            try:
                 if command is None:
-                    command = self.default_cmd
+                    command = default_cmd
                 response = None
+                exception = None
 
+                if isinstance(command, ValueCastable):
+                    command = Value.cast(command)
                 if isinstance(command, Value):
-                    exec(_RHSValueCompiler.compile(self.state, command, mode="curr"),
-                        self.exec_locals)
-                    response = Const(self.exec_locals["result"], command.shape()).value
+                    response = context._engine.get_value(command)
 
-                elif isinstance(command, Statement):
-                    exec(_StatementCompiler.compile(self.state, command),
-                        self.exec_locals)
+                elif isinstance(command, Assign):
+                    context.set(command.lhs, context._engine.get_value(command.rhs))
 
                 elif type(command) is Tick:
-                    domain = command.domain
-                    if isinstance(domain, ClockDomain):
-                        pass
-                    elif domain in self.domains:
-                        domain = self.domains[domain]
-                    else:
-                        raise NameError("Received command {!r} that refers to a nonexistent "
-                                        "domain {!r} from process {!r}"
-                                        .format(command, command.domain, self.src_loc()))
-                    self.add_trigger(domain.clk, trigger=1 if domain.clk_edge == "pos" else 0)
-                    if domain.rst is not None and domain.async_reset:
-                        self.add_trigger(domain.rst, trigger=1)
-                    return
+                    await context.tick(command.domain)
+
+                elif testbench and (command is None or isinstance(command, Settle)):
+                    raise TypeError(f"Command {command!r} is not allowed in testbenches")
 
                 elif type(command) is Settle:
-                    self.state.wait_interval(self, None)
-                    return
+                    await context.delay(0)
 
                 elif type(command) is Delay:
-                    # Internal timeline is in 1ps integeral units, intervals are public API and in floating point
-                    interval = int(command.interval * 1e12) if command.interval is not None else None
-                    self.state.wait_interval(self, interval)
-                    return
+                    await context.delay(command.interval or 0)
 
                 elif type(command) is Passive:
-                    self.passive = True
+                    context._process.critical = False
 
                 elif type(command) is Active:
-                    self.passive = False
+                    context._process.critical = True
 
                 elif command is None: # only possible if self.default_cmd is None
                     raise TypeError("Received default command from process {!r} that was added "
-                                    "with add_process(); did you mean to add this process with "
-                                    "add_sync_process() instead?"
-                                    .format(self.src_loc()))
+                                    "with add_process(); did you mean to use Tick() instead?"
+                                    .format(src_loc(coroutine)))
 
                 else:
                     raise TypeError("Received unsupported command {!r} from process {!r}"
-                                    .format(command, self.src_loc()))
-
-            except StopIteration:
-                self.passive = True
-                self.coroutine = None
-                return
+                                    .format(command, src_loc(coroutine)))
 
             except Exception as exn:
-                self.coroutine.throw(exn)
+                response = None
+                exception = exn
+
+    return inner

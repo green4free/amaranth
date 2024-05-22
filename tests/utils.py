@@ -6,8 +6,8 @@ import textwrap
 import traceback
 import unittest
 
-from amaranth.hdl.ast import *
-from amaranth.hdl.ir import *
+from amaranth.hdl._ast import *
+from amaranth.hdl._ir import *
 from amaranth.back import rtlil
 from amaranth._toolchain import require_tool
 
@@ -26,7 +26,7 @@ class FHDLTestCase(unittest.TestCase):
             return repr_str.strip()
         self.assertEqual(prepare_repr(repr(obj)), prepare_repr(repr_str))
 
-    def assertFormal(self, spec, mode="bmc", depth=1):
+    def assertFormal(self, spec, ports=None, mode="bmc", depth=1):
         stack = traceback.extract_stack()
         for frame in reversed(stack):
             if os.path.dirname(__file__) not in frame.filename:
@@ -72,7 +72,7 @@ class FHDLTestCase(unittest.TestCase):
             mode=mode,
             depth=depth,
             script=script,
-            rtlil=rtlil.convert_fragment(Fragment.get(spec, platform="formal").prepare())[0]
+            rtlil=rtlil.convert(spec, ports=ports, platform="formal"),
         )
         with subprocess.Popen(
                 [require_tool("sby"), "-f", "-d", spec_name],

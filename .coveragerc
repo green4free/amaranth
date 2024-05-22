@@ -3,10 +3,10 @@ branch = True
 include =
   amaranth/*
 omit =
-  amaranth/test/*
+  tests/*
 
 [report]
 exclude_lines =
-	:nocov:
+  :nocov:
 partial_branches =
   :nobr:

@@ -1,3 +1,10 @@
+import warnings
+
+warnings.warn("the `amaranth.lib.coding` module will be removed without a replacement; "
+              "copy the module into your project to continue using it",
+              DeprecationWarning, stacklevel=2)
+
+
 from .. import *
 
 
@@ -41,7 +48,7 @@ class Encoder(Elaboratable):
             for j in range(self.width):
                 with m.Case(1 << j):
                     m.d.comb += self.o.eq(j)
-            with m.Case():
+            with m.Default():
                 m.d.comb += self.n.eq(1)
         return m
 

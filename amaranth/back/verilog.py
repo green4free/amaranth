@@ -1,7 +1,5 @@
-import warnings
-
 from .._toolchain.yosys import *
-from ..hdl import ast, ir
+from ..hdl import _ast, _ir
 from ..lib import wiring
 from . import rtlil
 
@@ -10,16 +8,12 @@ __all__ = ["YosysError", "convert", "convert_fragment"]
 
 
 def _convert_rtlil_text(rtlil_text, *, strip_internal_attrs=False, write_verilog_opts=()):
-    # this version requirement needs to be synchronized with the one in pyproject.toml!
-    yosys = find_yosys(lambda ver: ver >= (0, 10))
-    yosys_version = yosys.version()
+    # This version requirement needs to be synchronized with the one in pyproject.toml!
+    yosys = find_yosys(lambda ver: ver >= (0, 40))
 
     script = []
-    script.append("read_ilang <<rtlil\n{}\nrtlil".format(rtlil_text))
-    if yosys_version >= (0, 17):
-        script.append("proc -nomux -norom")
-    else:
-        script.append("proc -nomux")
+    script.append(f"read_ilang <<rtlil\n{rtlil_text}\nrtlil")
+    script.append("proc -nomux -norom")
     script.append("memory_collect")
 
     if strip_internal_attrs:
@@ -51,14 +45,18 @@ def convert(elaboratable, name="top", platform=None, *, ports=None, emit_src=Tru
     if (ports is None and
             hasattr(elaboratable, "signature") and
             isinstance(elaboratable.signature, wiring.Signature)):
-        ports = []
+        ports = {}
         for path, member, value in elaboratable.signature.flatten(elaboratable):
-            if isinstance(value, ast.ValueCastable):
+            if isinstance(value, _ast.ValueCastable):
                 value = value.as_value()
-            if isinstance(value, ast.Value):
-                ports.append(value)
+            if isinstance(value, _ast.Value):
+                if member.flow == wiring.In:
+                    dir = _ir.PortDirection.Input
+                else:
+                    dir = _ir.PortDirection.Output
+                ports["__".join(map(str, path))] = (value, dir)
     elif ports is None:
         raise TypeError("The `convert()` function requires a `ports=` argument")
-    fragment = ir.Fragment.get(elaboratable, platform).prepare(ports=ports, **kwargs)
-    verilog_text, name_map = convert_fragment(fragment, name, emit_src=emit_src, strip_internal_attrs=strip_internal_attrs)
+    fragment = _ir.Fragment.get(elaboratable, platform)
+    verilog_text, name_map = convert_fragment(fragment, ports, name, emit_src=emit_src, strip_internal_attrs=strip_internal_attrs, **kwargs)
     return verilog_text

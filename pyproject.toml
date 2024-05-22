@@ -1,65 +1,103 @@
 # Project metadata
 
+[tool.pdm.version]
+source = "scm"
+version_format = "pdm_build:format_version"
+
 [project]
-dynamic = ["version", "urls"]
+dynamic = ["version"]
 
 name = "amaranth"
 description = "Amaranth hardware definition language"
+readme = "README.md"
 authors = [{name = "Amaranth HDL contributors"}]
 license = {file = "LICENSE.txt"}
 
 requires-python = "~=3.8"
 dependencies = [
   "importlib_resources; python_version<'3.9'", # for amaranth._toolchain.yosys
+  "jschon~=0.11.1", # for amaranth.lib.meta
   "pyvcd>=0.2.2,<0.5", # for amaranth.sim.pysim
   "Jinja2~=3.0", # for amaranth.build
 ]
 
 [project.optional-dependencies]
-# this version requirement needs to be synchronized with the one in amaranth.back.verilog!
-builtin-yosys = ["amaranth-yosys>=0.10"]
+# This version requirement needs to be synchronized with:
+# - pyproject.toml: tool.pdm.dev-dependencies.test
+# - amaranth/back/verilog.py: _convert_rtlil_text
+# - docs/install.rst: yosys-version
+builtin-yosys = ["amaranth-yosys>=0.40"]
 remote-build  = ["paramiko~=2.7"]
 
 [project.scripts]
 amaranth-rpc = "amaranth.rpc:main"
 
+[project.entry-points."amaranth.lib.meta"]
+"0.5/component.json" = "amaranth.lib.wiring:ComponentMetadata"
+
+[project.urls]
+"Homepage" = "https://amaranth-lang.org/"
+"Documentation" = "https://amaranth-lang.org/docs/amaranth/" # modified in pdm_build.py
+"Source Code" = "https://github.com/amaranth-lang/amaranth"
+"Bug Tracker" = "https://github.com/amaranth-lang/amaranth/issues"
+
 # Build system configuration
 
 [build-system]
-requires = ["wheel", "setuptools>=67.0", "setuptools_scm[toml]>=6.2"]
-build-backend = "setuptools.build_meta"
+requires = ["pdm-backend~=2.3.0"]
+build-backend = "pdm.backend"
 
-[tool.setuptools]
+[tool.pdm]
+# Remove this once we no longer support Python 3.8.
+ignore_package_warnings = ["sphinx*", "alabaster"]
+
+[tool.pdm.build]
 # If amaranth 0.3 is checked out with git (e.g. as a part of a persistent editable install or
 # a git worktree cached by tools like poetry), it can have an empty `nmigen` directory left over,
 # which causes a hard error because setuptools cannot determine the top-level package.
 # Add a workaround to improve experience for people upgrading from old checkouts.
-packages = ["amaranth"]
+includes = ["amaranth/"]
 
-[tool.setuptools_scm]
-local_scheme = "node-and-timestamp"
+source-includes = [
+  ".gitignore",
+  ".coveragerc",
+  ".env.toolchain",
+  "CONTRIBUTING.txt",
+]
 
 # Development workflow configuration
 
 [tool.pdm.dev-dependencies]
+# This version requirement needs to be synchronized with the one in pyproject.toml above!
 test = [
+  "yowasp-yosys>=0.40",
   "coverage",
 ]
 docs = [
-  "sphinx~=5.3",
+  "sphinx~=7.1",
   "sphinxcontrib-platformpicker~=1.3",
-  "sphinx-rtd-theme~=1.2",
+  "sphinxcontrib-yowasp-wavedrom==1.4", # exact version to avoid changes in rendering
+  "sphinx-rtd-theme~=2.0",
   "sphinx-autobuild",
+]
+examples = [
+  "amaranth-boards @ git+https://github.com/amaranth-lang/amaranth-boards.git"
 ]
 
 [tool.pdm.scripts]
-test.composite = ["test-code", "test-docs"]
+_.env_file = ".env.toolchain"
+
+test.composite = ["test-code", "test-docs", "coverage-xml"]
 test-code.env = {PYTHONWARNINGS = "error"}
 test-code.cmd = "python -m coverage run -m unittest discover -t . -s tests -v"
 test-docs.cmd = "sphinx-build -b doctest docs/ docs/_build"
 
-document.cmd = "sphinx-build docs/ docs/_build/"
+document.cmd = "sphinx-build docs/ docs/_build/ -W --keep-going"
 document-live.cmd = "sphinx-autobuild docs/ docs/_build/ --watch amaranth"
+document-linkcheck.cmd = "sphinx-build docs/ docs/_linkcheck/ -b linkcheck"
 
 coverage-text.cmd = "python -m coverage report"
 coverage-html.cmd = "python -m coverage html"
+coverage-xml.cmd  = "python -m coverage xml"
+
+extract-schemas.call = "amaranth.lib.meta:_extract_schemas('amaranth', base_uri='https://amaranth-lang.org/schema/amaranth')"
