@@ -679,6 +679,7 @@ class Module(_ModuleBuilderRoot, Elaboratable):
         while self._ctrl_stack:
             self._pop_ctrl()
     
+    __usePureIds = True
     __pureIds = set()
 
     @classmethod
@@ -686,8 +687,18 @@ class Module(_ModuleBuilderRoot, Elaboratable):
         cls.__pureIds.clear()
         Fragment.pureFragmentCache.clear()
 
+    @classmethod
+    def disablePureIdentifiers(cls):
+        cls.__usePureIds = False
+    
+    @classmethod
+    def enablePureIdentifiers(cls):
+        cls.__usePureIds = True
+
 
     def setPureIdentifier(self, *id):
+        if not self.__class__.__usePureIds:
+            return False
         assert isinstance(id, Hashable), "New pureIdentifier is not hashable"
         self._p_signature = id
         e = id in self.__class__.__pureIds
